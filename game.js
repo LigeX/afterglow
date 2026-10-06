@@ -1,8 +1,9 @@
 'use strict';
-const W=97,H=97,CENTER=48.5,PLAYER_SPEED=10.5,ENEMY_SPEED=PLAYER_SPEED*.8,HEAD_START=0,BODY_RADIUS=.48,ARENA_RADIUS=44,VISION=8.5,VIEW_SPAN=30;
+const W=97,H=97,CENTER=48.5,PLAYER_SPEED=10.5,ENEMY_SPEED=PLAYER_SPEED*.5,HEAD_START=3,BODY_RADIUS=.48,ARENA_RADIUS=44,VISION=8.5,VIEW_SPAN=30;
 const canvas=document.querySelector('#maze'),ctx=canvas.getContext('2d'),$=s=>document.querySelector(s);
 let grid,nav,owners,known,visible,player,enemy,target,exit,obstacles,mode='ready',elapsed=0,last=0,aiPath=[],pathTimer=0,openCount=0,scaleX=1,scaleY=1,effectTime=0,cameraSpan=VIEW_SPAN;
 const minimap=document.querySelector('#minimap'),miniCtx=minimap.getContext('2d'),camera={x:0,y:0};let playerHistory=[],pointer=null;
+let playerMovedAt=null,touchCount=0,wasTouching=false;
 const wisps=[{trail:[],particles:[],previous:null,emit:0},{trail:[],particles:[],previous:null,emit:0}];
 
 const PALETTE=['#67f4d1','#050508','#ae8aff','#ff9854','#72b6ff','#b9f56c','#fa82dc','#ff4e64','#e751ff','#8065ff','#448aff','#34e7ff','#ffe45e','#ffbd45','#6de76a','#32d59e','#25b9ad','#ff7865'];
@@ -96,7 +97,7 @@ function generate(mapType=Math.floor(Math.random()*MAP_TYPES.length)){score=0;fi
   buildGeometry(mapType);$('#map-name').textContent=stage.name;
   buildTreeMaze();
   for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++)if(free(x+.5,y+.5))nav[index(x,y)]=1;
-  placeLongRouteSpawns();player.colorIndex=0;enemy.colorIndex=1;spawnColors();target={...player};pointer=null;playerHistory=[{...player}];updateCamera();elapsed=0;aiPath=[];pathTimer=0;effectTime=0;mode='ready';
+  placeLongRouteSpawns();player.colorIndex=0;enemy.colorIndex=1;spawnColors();target={...player};pointer=null;playerHistory=[{...player}];updateCamera();elapsed=0;playerMovedAt=null;touchCount=0;wasTouching=false;aiPath=[];pathTimer=0;effectTime=0;mode='ready';
   for(const w of wisps){w.trail=[];w.particles=[];w.previous=null;w.emit=0;}
   openCount=grid.reduce((n,v)=>n+(v===0),0);resetPaintTrails();paint(player,1);paint(enemy,2);reveal();$('#time').textContent='00:00.0';$('#paint').textContent='0%';updateScore();$('#state').textContent='READY';updateColorLabels();
   show('Through the fog,<br>find the way out.','You are the last photon in a dying universe. Do everything you can to escape the black hole.','Escape the Black Hole!');
@@ -105,14 +106,24 @@ function show(title,message,button){if(mode==='ready')$('#overlay').classList.ad
 function start(){window.startCosmicMusic?.();if(mode==='won'||mode==='lost')generate();mode='playing';target={...player};pointer=null;$('#overlay').classList.add('hidden');}
 function finish(win,reason){finalScore=calculateScore();updateScore();mode=win?'won':'lost';if(win){$('#final-score').textContent='FINAL SCORE: '+finalScore.toLocaleString('en-US');$('#final-score').hidden=false;known.fill(1);visible.fill(1);updateCamera();$('#overlay').classList.add('result');document.querySelector('.board').classList.add('completed');show('You escaped as the last photon of your universe.','','PLAY AGAIN');}else{show('Escape failed. The black hole captured you!','','PLAY AGAIN');}}
 function slide(p,dx,dy){if(free(p.x+dx,p.y+dy)){p.x+=dx;p.y+=dy;return;}if(free(p.x+dx,p.y))p.x+=dx;if(free(p.x,p.y+dy))p.y+=dy;}
-function movePlayer(dt){const dx=target.x-player.x,dy=target.y-player.y,d=Math.hypot(dx,dy);if(d<.03)return;const amount=Math.min(d,dt*PLAYER_SPEED),steps=Math.ceil(amount/.08);for(let i=0;i<steps;i++){slide(player,dx/d*amount/steps,dy/d*amount/steps);paint(player,1);const previous=playerHistory[playerHistory.length-1];if(!previous||Math.hypot(player.x-previous.x,player.y-previous.y)>.12)playerHistory.push({...player});}reveal();updateCamera();}
-function moveEnemy(dt){if(elapsed<HEAD_START){$('#state').textContent='STARTING IN '+Math.ceil(HEAD_START-elapsed)+' s';return;}$('#state').textContent='PURSUING YOU';pathTimer-=dt;
+function movePlayer(dt){const oldX=player.x,oldY=player.y;const dx=target.x-player.x,dy=target.y-player.y,d=Math.hypot(dx,dy);if(d<.03)return;const amount=Math.min(d,dt*PLAYER_SPEED),steps=Math.ceil(amount/.08);for(let i=0;i<steps;i++){slide(player,dx/d*amount/steps,dy/d*amount/steps);paint(player,1);const previous=playerHistory[playerHistory.length-1];if(!previous||Math.hypot(player.x-previous.x,player.y-previous.y)>.12)playerHistory.push({...player});}if(playerMovedAt===null&&Math.hypot(player.x-oldX,player.y-oldY)>.0001)playerMovedAt=elapsed;reveal();updateCamera();}
+function moveEnemy(dt){if(playerMovedAt===null){$('#state').textContent='WAITING FOR YOUR MOVE';return;}if(elapsed-playerMovedAt<HEAD_START){$('#state').textContent='STARTING IN '+Math.ceil(HEAD_START-(elapsed-playerMovedAt))+' s';return;}$('#state').textContent='PURSUING YOU';pathTimer-=dt;
   if(pathTimer<=0){const destination=nearest(player),next=aiPath[0],offCenter=Math.hypot(enemy.x-(Math.floor(enemy.x)+.5),enemy.y-(Math.floor(enemy.y)+.5))>.01;
     if(offCenter&&next!==undefined)aiPath=[next,...route(next,destination)];
     else{const origin=nearest(enemy);aiPath=route(origin,destination);if(offCenter)aiPath.unshift(origin);}pathTimer=.65;}
   let budget=dt*ENEMY_SPEED;while(budget>0&&aiPath.length){const i=aiPath[0],x=i%W+.5,y=Math.floor(i/W)+.5,dx=x-enemy.x,dy=y-enemy.y,d=Math.hypot(dx,dy),step=Math.min(d,budget);if(d>.001)slide(enemy,dx/d*step,dy/d*step);budget-=step;paint(enemy,2);if(d<=step+.001)aiPath.shift();else break;}
 }
-function resolveOutcome(){if(Math.hypot(player.x-exit.x,player.y-exit.y)<1.65)finish(true,'You reached the central portal.');else if(elapsed>=HEAD_START&&Math.hypot(player.x-enemy.x,player.y-enemy.y)<.8&&free((player.x+enemy.x)/2,(player.y+enemy.y)/2))finish(false,'The pursuer caught you.');}
+function resolveOutcome(){
+  if(Math.hypot(player.x-exit.x,player.y-exit.y)<1.65){finish(true,'You reached the central portal.');return;}
+  const active=playerMovedAt!==null&&elapsed-playerMovedAt>=HEAD_START;
+  const distance=Math.hypot(player.x-enemy.x,player.y-enemy.y);
+  const clear=free((player.x+enemy.x)/2,(player.y+enemy.y)/2);
+  if(active&&distance<.8&&clear&&!wasTouching){
+    wasTouching=true;touchCount++;
+    if(touchCount>10){finish(false,'The pursuer caught you.');return;}
+  }else if(!active||distance>1.05||!clear){wasTouching=false;}
+  if(active)$('#state').textContent='PURSUING YOU · SAFE CONTACTS '+Math.max(0,10-touchCount)+'/10';
+}
 function resize(){const box=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(box.width*dpr);canvas.height=Math.round(box.height*dpr);scaleX=canvas.width/VIEW_SPAN;scaleY=canvas.height/VIEW_SPAN;minimap.width=Math.round(150*dpr);minimap.height=Math.round(150*dpr);updateCamera();}
 function updateWisp(p,w,dt){if(p===enemy){w.trail.length=0;w.emit+=dt;if(w.emit>.08){w.emit=0;const a=Math.random()*Math.PI*2;w.particles.push({x:p.x+Math.cos(a)*1.3,y:p.y+Math.sin(a)*1.3,vx:-Math.cos(a)*.65,vy:-Math.sin(a)*.65,life:.7,size:.05+Math.random()*.035});}for(const q of w.particles){q.life-=dt;q.x+=q.vx*dt;q.y+=q.vy*dt;}w.particles=w.particles.filter(q=>q.life>0).slice(-12);return;}if(!w.previous||Math.hypot(p.x-w.previous.x,p.y-w.previous.y)>2){w.trail=[];w.particles=[];w.previous={...p};}for(const point of w.trail)point.life-=dt;w.trail=w.trail.filter(point=>point.life>0);
   const dx=p.x-w.previous.x,dy=p.y-w.previous.y,moving=Math.hypot(dx,dy)>.002;if(moving){w.trail.push({x:p.x,y:p.y,life:1.05,colorIndex:p.colorIndex});if(w.trail.length>90)w.trail.shift();}w.emit+=dt;
